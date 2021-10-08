@@ -2,9 +2,13 @@ import discord
 import json
 import youtube_dl
 import os
+import re
+import asyncio
 
-
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 from youtube_search import YoutubeSearch
+
 
 ydl_opts = {
     'format': 'bestaudio/best',
@@ -26,7 +30,7 @@ class MusicBot(discord.Client):
         self.musicQueue = []
         self.searchList = []
         self.emoji =  [i for i in client.emojis if i.name == 'Ice_Bear'][0]
-        self.state = True
+        self.lock = asyncio.Lock()
     
     def finished_song(self, error):
         assert(len(self.musicQueue) != 0)
@@ -57,15 +61,36 @@ class MusicBot(discord.Client):
         embed.description = ">>> {0}".format(msg)
         await message.channel.send(embed=embed)
 
+    def parse_search(self, message):
+        print(message)
+        if re.match('http', message):
+            match =  re.search('playlist/(.*)?', message)
+            if match:
+                playlist_id = match.group(1)
+                playlist_songs = sp.playlist(playlist_id)['tracks']['items']
+                song_list = list()
+                for song in playlist_songs:
+                    search_message = song['track']['name']
+                    for artist in song['track']['artists']:
+                        search_message += " " + artist['name']
+                    song_list.append(search_message + " audio")
+                return song_list
+            else:
+                return [message]
+        else:
+            return [message]
+        
+
     async def on_message(self, message):
         full_command = message.content.split(' ')
         command = full_command.pop(0)
-        if not hasattr(self, 'state'):
+        if not hasattr(self, 'lock') or self.lock.locked():
             return
         # don't respond to ourselves
         if message.author == self.user:
             return
 
+        await self.lock.acquire()
         if command == "-help" or command == "-h":
             embed = discord.Embed(title="Welcome to the Scuffed Music bot!")
             commands = ["-help|-h", "-play|-p [-n] song", "-skip", "-stop", "-queue", "-remove|-r number", "-search song", "number [-n]"]
@@ -74,7 +99,7 @@ class MusicBot(discord.Client):
             "Search youtube for song, and return 10 results.", "Once search is executed, choose from 1 - 10 for the selected song."]
             embed.add_field(name = "Commands", value = "\n".join(commands), inline = True)
             embed.add_field(name = "Usages", value = "\n".join(usages), inline = True)
-            await message.channel.send(embed=embed)
+            message.channel.send(embed=embed)
 
         if command == "-queue" or command == "-q":
             queue_result_message =""
@@ -85,6 +110,7 @@ class MusicBot(discord.Client):
         if command == "-remove" or command == "-r":
             if self.Client == None:
                 await self.send_message(message, 'Bot is not connected to a channel.')
+                self.lock.release()
                 return
             if len(full_command) == 0:
                 await self.send_message(message, 'Specify a number.')
@@ -105,20 +131,27 @@ class MusicBot(discord.Client):
             await self.try_join_voice_channel(message.author.voice.channel)
             if (len(full_command) < 0):
                 await self.send_message(message, "Ok but play wot?")
+                self.lock.release()
                 return
-            search = " ".join(full_command)
-            results  = YoutubeSearch(search, max_results = 1).to_dict()
-            url = 'https://www.youtube.com' + results[0]['url_suffix']
-            song = Song(results[0].get("title"), url, results[0].get('duration'))
+            search_list = self.parse_search(" ".join(full_command))
+            song = None
+            for search in search_list:
+                results  = YoutubeSearch(search, max_results = 1).to_dict()
+                url = 'https://www.youtube.com' + results[0]['url_suffix']
+                song = Song(results[0].get("title"), url, results[0].get('duration'))
+                if len(self.musicQueue) == 0:
+                    self.stream_song(song)
+                self.musicQueue.append(song) if not next else self.musicQueue.insert(1, song)
 
-            if len(self.musicQueue) == 0:
-                self.stream_song(song)
-            self.musicQueue.append(song) if not next else self.musicQueue.insert(1, song)
-            await self.send_message(message, "Queued [{0}]({1})".format(song.title, song.url))
+            if len(search_list) == 1:
+                await self.send_message(message, "Queued [{0}]({1})".format(song.title, song.url))
+            else:
+                await self.send_message(message, "Queued [{0} songs]({1})".format(len(search_list), " ".join(full_command)))
         
         if command == "-search":
             if len(full_command) == 0:
                 await message.add_reaction(client.get_emoji(self.emoji.id))
+                self.lock.release()
                 return
             if len(self.searchList) > 0:
                 self.searchList.clear()
@@ -136,9 +169,11 @@ class MusicBot(discord.Client):
         if command == "-skip":
             if self.Client == None:
                 await self.send_message(message, 'Bot is not connected to a channel.')
+                self.lock.release()
                 return
             if len(self.musicQueue) == 0:
                 await self.send_message(message, 'No song is playing.')
+                self.lock.release()
                 return
             self.Client.stop()
             await message.add_reaction(client.get_emoji(self.emoji.id))
@@ -146,9 +181,11 @@ class MusicBot(discord.Client):
         if command == "-stop" or command == "-shine":
             if self.Client == None:
                 await self.send_message(message, 'Bot is not connected to a channel.')
+                self.lock.release()
                 return
             if len(self.musicQueue) == 0:
                 await self.send_message(message, 'No song is playing.')
+                self.lock.release()
                 return
             self.Client.stop()
             self.musicQueue.clear()
@@ -160,20 +197,24 @@ class MusicBot(discord.Client):
                 next = True
                 full_command.pop(0)
             if len(self.searchList) == 0:
+                self.lock.release()
                 return
             await self.try_join_voice_channel(message.author.voice.channel)
 
             if index <= 0 or index > len(self.searchList):
                 await self.send_message(message, 'The number you chose is out of bounds.')
+                self.lock.release()
                 return
 
             if len(self.musicQueue) == 0:
                 self.stream_song(self.searchList[index - 1])
             self.musicQueue.append(self.searchList[index - 1]) if not next else self.musicQueue.insert(1, self.searchList[index - 1])
             self.searchList.clear()
+        self.lock.release()
 
 with open('music_secrets.json') as file:
   file_json = json.load(file)
 
+sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=file_json['spotify_client'], client_secret=file_json['spotify_secret']))
 client = MusicBot()
 client.run(file_json['token'])
