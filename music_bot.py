@@ -62,7 +62,6 @@ class MusicBot(discord.Client):
         await message.channel.send(embed=embed)
 
     def parse_search(self, message):
-        print(message)
         if re.match('http', message):
             match =  re.search('playlist/(.*)?', message)
             if match:
