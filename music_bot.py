@@ -53,7 +53,7 @@ class MusicBot(discord.Client):
             self.Client = await voice_channel.connect()
         if self.Client.channel.id != voice_channel.id:
             self.Client.stop()
-            await voice_channel.disconnect()
+            await self.Client.disconnect()
             self.Client = await voice_channel.connect()
 
     async def send_message(self, message, msg):
